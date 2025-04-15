@@ -193,8 +193,12 @@ helmDefaults:
   # verify the chart before upgrading (only works with packaged charts not directories) (default false)
   verify: true
   keyring: path/to/keyring.gpg
+  #  --skip-schema-validation flag to helm 'install', 'upgrade' and 'lint', starts with helm 3.16.0 (default false)
+  skipSchemaValidation: false
   # wait for k8s resources via --wait. (default false)
   wait: true
+  # if set and --wait enabled, will retry any failed check on resource state subject to the specified number of retries (default 0)
+  waitRetries: 3
   # if set and --wait enabled, will wait until all Jobs have been completed before marking the release as successful. It will wait for as long as --timeout (default false, Implemented in Helm3.5)
   waitForJobs: true
   # time in seconds to wait for any individual Kubernetes operation (like Jobs for hooks, and waits on pod/pvc/svc/deployment readiness) (default 300)
@@ -236,6 +240,9 @@ helmDefaults:
   # suppressOutputLineRegex is a list of regex patterns to suppress output lines from helm diff (default []), available in helmfile v0.162.0
   suppressOutputLineRegex:
     - "version"
+  # syncReleaseLabels is a list of labels to be added to the release when syncing.
+  syncReleaseLabels: false
+
 
 # these labels will be applied to all releases in a Helmfile. Useful in templating if you have a helmfile per environment or customer and don't want to copy the same label to each release
 commonLabels:
@@ -311,7 +318,10 @@ releases:
     # Override helmDefaults options for verify, wait, waitForJobs, timeout, recreatePods and force.
     verify: true
     keyring: path/to/keyring.gpg
+    #  --skip-schema-validation flag to helm 'install', 'upgrade' and 'lint', starts with helm 3.16.0 (default false)
+    skipSchemaValidation: false
     wait: true
+    waitRetries: 3
     waitForJobs: true
     timeout: 60
     recreatePods: true
@@ -362,6 +372,8 @@ releases:
     # suppressOutputLineRegex is a list of regex patterns to suppress output lines from helm diff (default []), available in helmfile v0.162.0
     suppressOutputLineRegex:
       - "version"
+    # syncReleaseLabels is a list of labels to be added to the release when syncing.
+    syncReleaseLabels: false
 
 
   # Local chart example
@@ -557,7 +569,6 @@ Helmfile uses some OS environment variables to override default behaviour:
 * `HELMFILE_ENVIRONMENT` - specify [Helmfile environment](https://helmfile.readthedocs.io/en/latest/#environment), it has lower priority than CLI argument `--environment`
 * `HELMFILE_TEMPDIR` - specify directory to store temporary files
 * `HELMFILE_UPGRADE_NOTICE_DISABLED` - expecting any non-empty value to skip the check for the latest version of Helmfile in [helmfile version](https://helmfile.readthedocs.io/en/latest/#version)
-* `HELMFILE_V1MODE` - Helmfile v0.x behaves like v1.x with `true`, Helmfile v1.x behaves like v0.x with `false` as value
 * `HELMFILE_GOCCY_GOYAML` - use *goccy/go-yaml* instead of *gopkg.in/yaml.v2*.  It's `false` by default in Helmfile v0.x and `true` by default for Helmfile v1.x.
 * `HELMFILE_CACHE_HOME` - specify directory to store cached files for remote operations
 * `HELMFILE_FILE_PATH` - specify the path to the helmfile.yaml file
@@ -685,7 +696,7 @@ The `helmfile destroy` sub-command uninstalls and purges all the releases define
 `helmfile --interactive destroy` instructs Helmfile to request your confirmation before actually deleting releases.
 
 `destroy` basically runs `helm uninstall --purge` on all the targeted releases. If you don't want purging, use `helmfile delete` instead.
-If `--skip-charts` flag is not set, destory would prepare all releases, by fetching charts and templating them.
+If `--skip-charts` flag is not set, destroy would prepare all releases, by fetching charts and templating them.
 
 ### delete (DEPRECATED)
 
@@ -694,7 +705,7 @@ The `helmfile delete` sub-command deletes all the releases defined in the manife
 `helmfile --interactive delete` instructs Helmfile to request your confirmation before actually deleting releases.
 
 Note that `delete` doesn't purge releases. So `helmfile delete && helmfile sync` results in sync failed due to that releases names are not deleted but preserved for future references. If you really want to remove releases for reuse, add `--purge` flag to run it like `helmfile delete --purge`.
-If `--skip-charts` flag is not set, destory would prepare all releases, by fetching charts and templating them.
+If `--skip-charts` flag is not set, destroy would prepare all releases, by fetching charts and templating them.
 
 ### secrets
 
@@ -758,7 +769,7 @@ For additional context, take a look at [paths examples](paths.md).
 
 A selector can be used to only target a subset of releases when running Helmfile. This is useful for large helmfiles with releases that are logically grouped together.
 
-Labels are simple key value pairs that are an optional field of the release spec. When selecting by label, the search can be inverted. `tier!=backend` would match all releases that do NOT have the `tier: backend` label. `tier=fronted` would only match releases with the `tier: frontend` label.
+Labels are simple key value pairs that are an optional field of the release spec. When selecting by label, the search can be inverted. `tier!=backend` would match all releases that do NOT have the `tier: backend` label. `tier=frontend` would only match releases with the `tier: frontend` label.
 
 Multiple labels can be specified using `,` as a separator. A release must match all selectors in order to be selected for the final helm command.
 

@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM golang:1.23-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
 
 RUN apk add --no-cache make git
 WORKDIR /workspace/helmfile
@@ -35,7 +35,7 @@ ENV HELM_CONFIG_HOME="${HELM_CONFIG_HOME}"
 ARG HELM_DATA_HOME="${HOME}/.local/share/helm"
 ENV HELM_DATA_HOME="${HELM_DATA_HOME}"
 
-ARG HELM_VERSION="v3.17.0"
+ARG HELM_VERSION="v3.17.3"
 ENV HELM_VERSION="${HELM_VERSION}"
 ARG HELM_LOCATION="https://get.helm.sh"
 ARG HELM_FILENAME="helm-${HELM_VERSION}-${TARGETOS}-${TARGETARCH}.tar.gz"
@@ -43,8 +43,8 @@ RUN set -x && \
     curl --retry 5 --retry-connrefused -LO "${HELM_LOCATION}/${HELM_FILENAME}" && \
     echo Verifying ${HELM_FILENAME}... && \
     case ${TARGETPLATFORM} in \
-    "linux/amd64")  HELM_SHA256="fb5d12662fde6eeff36ac4ccacbf3abed96b0ee2de07afdde4edb14e613aee24"  ;; \
-    "linux/arm64")  HELM_SHA256="c4d4be8e80082b7eaa411e3e231d62cf05d01cddfef59b0d01006a7901e11ee4"  ;; \
+    "linux/amd64")  HELM_SHA256="ee88b3c851ae6466a3de507f7be73fe94d54cbf2987cbaa3d1a3832ea331f2cd"  ;; \
+    "linux/arm64")  HELM_SHA256="7944e3defd386c76fd92d9e6fec5c2d65a323f6fadc19bfb5e704e3eee10348e"  ;; \
     esac && \
     echo "${HELM_SHA256}  ${HELM_FILENAME}" | sha256sum -c && \
     echo Extracting ${HELM_FILENAME}... && \
@@ -55,13 +55,13 @@ RUN set -x && \
 # using the install documentation found at https://kubernetes.io/docs/tasks/tools/install-kubectl/
 # for now but in a future version of alpine (in the testing version at the time of writing)
 # we should be able to install using apk add.
-ENV KUBECTL_VERSION="v1.30.8"
+ENV KUBECTL_VERSION="v1.32.1"
 RUN set -x && \
     curl --retry 5 --retry-connrefused -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/${TARGETOS}/${TARGETARCH}/kubectl" && \
     case ${TARGETPLATFORM} in \
     # checksums are available at https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/${TARGETOS}/${TARGETARCH}/kubectl.sha256
-    "linux/amd64")  KUBECTL_SHA256="7f39bdcf768ce4b8c1428894c70c49c8b4d2eee52f3606eb02f5f7d10f66d692"  ;; \
-    "linux/arm64")  KUBECTL_SHA256="e51d6a76fade0871a9143b64dc62a5ff44f369aa6cb4b04967d93798bf39d15b"  ;; \
+    "linux/amd64")  KUBECTL_SHA256="e16c80f1a9f94db31063477eb9e61a2e24c1a4eee09ba776b029048f5369db0c"  ;; \
+    "linux/arm64")  KUBECTL_SHA256="98206fd83a4fd17f013f8c61c33d0ae8ec3a7c53ec59ef3d6a0a9400862dc5b2"  ;; \
     esac && \
     echo "${KUBECTL_SHA256}  kubectl" | sha256sum -c && \
     chmod +x kubectl && \
@@ -99,10 +99,10 @@ RUN set -x && \
     [ "$(age --version)" = "${AGE_VERSION}" ] && \
     [ "$(age-keygen --version)" = "${AGE_VERSION}" ]
 
-RUN helm plugin install https://github.com/databus23/helm-diff --version v3.9.14 && \
-    helm plugin install https://github.com/jkroepke/helm-secrets --version v4.6.0 && \
-    helm plugin install https://github.com/hypnoglow/helm-s3.git --version v0.16.2 && \
-    helm plugin install https://github.com/aslafy-z/helm-git.git --version v0.16.0 && \
+RUN helm plugin install https://github.com/databus23/helm-diff --version v3.11.0 && \
+    helm plugin install https://github.com/jkroepke/helm-secrets --version v4.6.3 && \
+    helm plugin install https://github.com/hypnoglow/helm-s3.git --version v0.16.3 && \
+    helm plugin install https://github.com/aslafy-z/helm-git.git --version v1.3.0 && \
     rm -rf ${HELM_CACHE_HOME}/plugins
 
 # Allow users other than root to use helm plugins located in root home

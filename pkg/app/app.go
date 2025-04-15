@@ -20,7 +20,6 @@ import (
 	"github.com/helmfile/helmfile/pkg/helmexec"
 	"github.com/helmfile/helmfile/pkg/plugins"
 	"github.com/helmfile/helmfile/pkg/remote"
-	"github.com/helmfile/helmfile/pkg/runtime"
 	"github.com/helmfile/helmfile/pkg/state"
 )
 
@@ -133,25 +132,6 @@ func (a *App) Repos(c ReposConfigProvider) error {
 
 		if reposErr != nil {
 			errs = append(errs, reposErr)
-		}
-
-		return
-	}, c.IncludeTransitiveNeeds(), SetFilter(true))
-}
-
-// TODO: Remove this function once Helmfile v0.x
-func (a *App) DeprecatedSyncCharts(c DeprecatedChartsConfigProvider) error {
-	return a.ForEachState(func(run *Run) (_ bool, errs []error) {
-		err := run.withPreparedCharts("charts", state.ChartPrepareOptions{
-			SkipRepos:   true,
-			SkipDeps:    true,
-			Concurrency: 2,
-		}, func() {
-			errs = run.DeprecatedSyncCharts(c)
-		})
-
-		if err != nil {
-			errs = append(errs, err)
 		}
 
 		return
@@ -385,6 +365,7 @@ func (a *App) Sync(c SyncConfigProvider) error {
 			SkipRefresh:            c.SkipRefresh(),
 			SkipDeps:               c.SkipDeps(),
 			Wait:                   c.Wait(),
+			WaitRetries:            c.WaitRetries(),
 			WaitForJobs:            c.WaitForJobs(),
 			IncludeCRDs:            &includeCRDs,
 			IncludeTransitiveNeeds: c.IncludeNeeds(),
@@ -409,7 +390,7 @@ func (a *App) Apply(c ApplyConfigProvider) error {
 
 	var opts []LoadOption
 
-	opts = append(opts, SetRetainValuesFiles(c.RetainValuesFiles() || c.SkipCleanup()))
+	opts = append(opts, SetRetainValuesFiles(c.SkipCleanup()))
 
 	err := a.ForEachState(func(run *Run) (ok bool, errs []error) {
 		includeCRDs := !c.SkipCRDs()
@@ -419,9 +400,10 @@ func (a *App) Apply(c ApplyConfigProvider) error {
 			SkipRefresh:            c.SkipRefresh(),
 			SkipDeps:               c.SkipDeps(),
 			Wait:                   c.Wait(),
+			WaitRetries:            c.WaitRetries(),
 			WaitForJobs:            c.WaitForJobs(),
 			IncludeCRDs:            &includeCRDs,
-			SkipCleanup:            c.RetainValuesFiles() || c.SkipCleanup(),
+			SkipCleanup:            c.SkipCleanup(),
 			Validate:               c.Validate(),
 			Concurrency:            c.Concurrency(),
 			IncludeTransitiveNeeds: c.IncludeNeeds(),
@@ -471,31 +453,6 @@ func (a *App) Status(c StatusesConfigProvider) error {
 
 		return
 	}, false, SetFilter(true))
-}
-
-// TODO: Remove this function once Helmfile v0.x
-func (a *App) Delete(c DeleteConfigProvider) error {
-	return a.ForEachState(func(run *Run) (ok bool, errs []error) {
-		if !c.SkipCharts() {
-			err := run.withPreparedCharts("delete", state.ChartPrepareOptions{
-				SkipRepos:     c.SkipRefresh() || c.SkipDeps(),
-				SkipRefresh:   c.SkipRefresh(),
-				SkipDeps:      c.SkipDeps(),
-				Concurrency:   c.Concurrency(),
-				DeleteWait:    c.DeleteWait(),
-				DeleteTimeout: c.DeleteTimeout(),
-			}, func() {
-				ok, errs = a.delete(run, c.Purge(), c)
-			})
-
-			if err != nil {
-				errs = append(errs, err)
-			}
-		} else {
-			ok, errs = a.delete(run, c.Purge(), c)
-		}
-		return
-	}, false, SetReverse(true))
 }
 
 func (a *App) Destroy(c DestroyConfigProvider) error {
@@ -1048,7 +1005,7 @@ func printDAG(batches [][]state.Release) string {
 	for i, batch := range batches {
 		for _, r := range batch {
 			id := state.ReleaseToID(&r.ReleaseSpec)
-			needs := r.ReleaseSpec.Needs
+			needs := r.Needs
 			_, _ = fmt.Fprintf(w, "%d\t%s\t%s\n", i+1, id, strings.Join(needs, ", "))
 		}
 	}
@@ -1149,13 +1106,17 @@ func (a *App) visitStatesWithSelectorsAndRemoteSupport(fileOrDir string, converg
 		}
 	}
 
-	// pre-overrides HelmState
+	// pre-handles HelmState
 	fHelmStatsWithOverrides := func(st *state.HelmState) (bool, []error) {
 		var err error
+		// override release settings
 		st.Releases, err = st.GetReleasesWithOverrides()
 		if err != nil {
 			return false, []error{err}
 		}
+
+		// override release labels
+		st.Releases = st.GetReleasesWithLabels()
 		return f(st)
 	}
 
@@ -1258,16 +1219,6 @@ func (a *App) findDesiredStateFiles(specifiedPath string, opts LoadOpts) ([]stri
 
 		case a.fs.FileExistsAt(DefaultGotmplHelmfile):
 			defaultFile = DefaultGotmplHelmfile
-
-		// TODO: Remove this block when we remove v0 code
-		case !runtime.V1Mode && a.fs.FileExistsAt(DeprecatedHelmfile):
-			a.Logger.Warnf(
-				"warn: %s is being loaded: %s is deprecated in favor of %s. See https://github.com/roboll/helmfile/issues/25 for more information",
-				DeprecatedHelmfile,
-				DeprecatedHelmfile,
-				DefaultHelmfile,
-			)
-			defaultFile = DeprecatedHelmfile
 		}
 
 		switch {
@@ -1322,7 +1273,6 @@ func (a *App) getSelectedReleases(r *Run, includeTransitiveNeeds bool) ([]state.
 	selectedIds := map[string]state.ReleaseSpec{}
 	selectedCounts := map[string]int{}
 	for _, r := range selected {
-		r := r
 		id := state.ReleaseToID(&r)
 		selectedIds[id] = r
 		selectedCounts[id]++
@@ -1336,7 +1286,6 @@ func (a *App) getSelectedReleases(r *Run, includeTransitiveNeeds bool) ([]state.
 
 	groupsByID := map[string][]*state.ReleaseSpec{}
 	for _, r := range allReleases {
-		r := r
 		groupsByID[state.ReleaseToID(&r)] = append(groupsByID[state.ReleaseToID(&r)], &r)
 	}
 
@@ -1432,13 +1381,14 @@ func (a *App) apply(r *Run, c ApplyConfigProvider) (bool, bool, []error) {
 		Context:                 c.Context(),
 		Output:                  c.DiffOutput(),
 		Set:                     c.Set(),
-		SkipCleanup:             c.RetainValuesFiles() || c.SkipCleanup(),
+		SkipCleanup:             c.SkipCleanup(),
 		SkipDiffOnInstall:       c.SkipDiffOnInstall(),
 		ReuseValues:             c.ReuseValues(),
 		ResetValues:             c.ResetValues(),
 		DiffArgs:                c.DiffArgs(),
 		PostRenderer:            c.PostRenderer(),
 		PostRendererArgs:        c.PostRendererArgs(),
+		SkipSchemaValidation:    c.SkipSchemaValidation(),
 		SuppressOutputLineRegex: c.SuppressOutputLineRegex(),
 	}
 
@@ -1543,9 +1493,10 @@ Do you really want to apply?
 
 				syncOpts := &state.SyncOpts{
 					Set:                  c.Set(),
-					SkipCleanup:          c.RetainValuesFiles() || c.SkipCleanup(),
+					SkipCleanup:          c.SkipCleanup(),
 					SkipCRDs:             c.SkipCRDs(),
 					Wait:                 c.Wait(),
+					WaitRetries:          c.WaitRetries(),
 					WaitForJobs:          c.WaitForJobs(),
 					ReuseValues:          c.ReuseValues(),
 					ResetValues:          c.ResetValues(),
@@ -1555,6 +1506,7 @@ Do you really want to apply?
 					SyncArgs:             c.SyncArgs(),
 					HideNotes:            c.HideNotes(),
 					TakeOwnership:        c.TakeOwnership(),
+					SyncReleaseLabels:    c.SyncReleaseLabels(),
 				}
 				return subst.SyncReleases(&affectedReleases, helm, c.Values(), c.Concurrency(), syncOpts)
 			}))
@@ -1940,17 +1892,20 @@ Do you really want to sync?
 				subst.Releases = rs
 
 				opts := &state.SyncOpts{
-					Set:              c.Set(),
-					SkipCRDs:         c.SkipCRDs(),
-					Wait:             c.Wait(),
-					WaitForJobs:      c.WaitForJobs(),
-					ReuseValues:      c.ReuseValues(),
-					ResetValues:      c.ResetValues(),
-					PostRenderer:     c.PostRenderer(),
-					PostRendererArgs: c.PostRendererArgs(),
-					SyncArgs:         c.SyncArgs(),
-					HideNotes:        c.HideNotes(),
-					TakeOwnership:    c.TakeOwnership(),
+					Set:                  c.Set(),
+					SkipCRDs:             c.SkipCRDs(),
+					Wait:                 c.Wait(),
+					WaitRetries:          c.WaitRetries(),
+					WaitForJobs:          c.WaitForJobs(),
+					ReuseValues:          c.ReuseValues(),
+					ResetValues:          c.ResetValues(),
+					PostRenderer:         c.PostRenderer(),
+					PostRendererArgs:     c.PostRendererArgs(),
+					SyncArgs:             c.SyncArgs(),
+					HideNotes:            c.HideNotes(),
+					TakeOwnership:        c.TakeOwnership(),
+					SkipSchemaValidation: c.SkipSchemaValidation(),
+					SyncReleaseLabels:    c.SyncReleaseLabels(),
 				}
 				return subst.SyncReleases(&affectedReleases, helm, c.Values(), c.Concurrency(), opts)
 			}))
@@ -1978,16 +1933,17 @@ func (a *App) template(r *Run, c TemplateConfigProvider) (bool, []error) {
 		}
 
 		opts := &state.TemplateOpts{
-			Set:               c.Set(),
-			IncludeCRDs:       c.IncludeCRDs(),
-			NoHooks:           c.NoHooks(),
-			OutputDirTemplate: c.OutputDirTemplate(),
-			SkipCleanup:       c.SkipCleanup(),
-			SkipTests:         c.SkipTests(),
-			PostRenderer:      c.PostRenderer(),
-			PostRendererArgs:  c.PostRendererArgs(),
-			KubeVersion:       c.KubeVersion(),
-			ShowOnly:          c.ShowOnly(),
+			Set:                  c.Set(),
+			IncludeCRDs:          c.IncludeCRDs(),
+			NoHooks:              c.NoHooks(),
+			OutputDirTemplate:    c.OutputDirTemplate(),
+			SkipCleanup:          c.SkipCleanup(),
+			SkipTests:            c.SkipTests(),
+			PostRenderer:         c.PostRenderer(),
+			PostRendererArgs:     c.PostRendererArgs(),
+			KubeVersion:          c.KubeVersion(),
+			ShowOnly:             c.ShowOnly(),
+			SkipSchemaValidation: c.SkipSchemaValidation(),
 		}
 		return st.TemplateReleases(helm, c.OutputDir(), c.Values(), args, c.Concurrency(), c.Validate(), opts)
 	})

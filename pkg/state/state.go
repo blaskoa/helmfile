@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -59,10 +58,6 @@ type ReleaseSetSpec struct {
 	Bases        []string          `yaml:"bases,omitempty"`
 	HelmDefaults HelmSpec          `yaml:"helmDefaults,omitempty"`
 	Helmfiles    []SubHelmfileSpec `yaml:"helmfiles,omitempty"`
-
-	// TODO: Remove this function once Helmfile v0.x
-	DeprecatedContext  string        `yaml:"context,omitempty"`
-	DeprecatedReleases []ReleaseSpec `yaml:"charts,omitempty"`
 
 	OverrideKubeContext string            `yaml:"kubeContext,omitempty"`
 	OverrideNamespace   string            `yaml:"namespace,omitempty"`
@@ -161,12 +156,14 @@ type HelmSpec struct {
 	Keyring     string   `yaml:"keyring,omitempty"`
 	// EnableDNS, when set to true, enable DNS lookups when rendering templates
 	EnableDNS bool `yaml:"enableDNS"`
-	// Propagate '--skipSchemaValidation' to helmv3 template and helm install
+	// Propagate '--skip-schema-validation' to helmv3 template and helm install
 	SkipSchemaValidation *bool `yaml:"skipSchemaValidation,omitempty"`
 	// Devel, when set to true, use development versions, too. Equivalent to version '>0.0.0-0'
 	Devel bool `yaml:"devel"`
 	// Wait, if set to true, will wait until all Pods, PVCs, Services, and minimum number of Pods of a Deployment are in a ready state before marking the release as successful
 	Wait bool `yaml:"wait"`
+	// WaitRetries, if set and --wait enabled, will retry any failed check on resource state, except if HTTP status code < 500 is received, subject to the specified number of retries
+	WaitRetries int `yaml:"waitRetries"`
 	// WaitForJobs, if set and --wait enabled, will wait until all Jobs have been completed before marking the release as successful. It will wait for as long as --timeout
 	WaitForJobs bool `yaml:"waitForJobs"`
 	// Timeout is the time in seconds to wait for any individual Kubernetes operation (like Jobs for hooks, and waits on pod/pvc/svc/deployment readiness) (default 300)
@@ -210,6 +207,8 @@ type HelmSpec struct {
 	DeleteWait bool `yaml:"deleteWait"`
 	// Timeout is the time in seconds to wait for helmfile delete command (default 300)
 	DeleteTimeout int `yaml:"deleteTimeout"`
+	// SyncReleaseLabels is true if the release labels should be synced with the helmfile labels
+	SyncReleaseLabels bool `yaml:"syncReleaseLabels"`
 }
 
 // RepositorySpec that defines values for a helm repo
@@ -262,6 +261,8 @@ type ReleaseSpec struct {
 	Devel *bool `yaml:"devel,omitempty"`
 	// Wait, if set to true, will wait until all Pods, PVCs, Services, and minimum number of Pods of a Deployment are in a ready state before marking the release as successful
 	Wait *bool `yaml:"wait,omitempty"`
+	// WaitRetries, if set and --wait enabled, will retry any failed check on resource state, except if HTTP status code < 500 is received, subject to the specified number of retries
+	WaitRetries *int `yaml:"waitRetries,omitempty"`
 	// WaitForJobs, if set and --wait enabled, will wait until all Jobs have been completed before marking the release as successful. It will wait for as long as --timeout
 	WaitForJobs *bool `yaml:"waitForJobs,omitempty"`
 	// Timeout is the time in seconds to wait for any individual Kubernetes operation (like Jobs for hooks, and waits on pod/pvc/svc/deployment readiness) (default 300)
@@ -386,7 +387,7 @@ type ReleaseSpec struct {
 	// Propagate '--post-renderer' to helmv3 template and helm install
 	PostRenderer *string `yaml:"postRenderer,omitempty"`
 
-	// Propagate '--skipSchemaValidation' to helmv3 template and helm install
+	// Propagate '--skip-schema-validation' to helmv3 template and helm install
 	SkipSchemaValidation *bool `yaml:"skipSchemaValidation,omitempty"`
 
 	// Propagate '--post-renderer-args' to helmv3 template and helm install
@@ -408,6 +409,8 @@ type ReleaseSpec struct {
 	DeleteWait *bool `yaml:"deleteWait,omitempty"`
 	// Timeout is the time in seconds to wait for helmfile delete command (default 300)
 	DeleteTimeout *int `yaml:"deleteTimeout,omitempty"`
+	// SyncReleaseLabels is true if the release labels should be synced with the helmfile labels
+	SyncReleaseLabels bool `yaml:"syncReleaseLabels"`
 }
 
 func (r *Inherits) UnmarshalYAML(unmarshal func(any) error) error {
@@ -485,7 +488,17 @@ func (st *HelmState) reformat(spec *ReleaseSpec) []string {
 	var needs []string
 	releaseInstalledInfo := make(map[string]bool)
 	for _, r := range st.OrginReleases {
-		releaseInstalledInfo[r.Name] = r.Desired()
+		kubecontext := r.KubeContext
+		namespace := r.Namespace
+
+		if st.OverrideKubeContext != "" {
+			kubecontext = st.OverrideKubeContext
+		}
+		if st.OverrideNamespace != "" {
+			namespace = st.OverrideNamespace
+		}
+
+		releaseInstalledInfo[fmt.Sprintf("%s/%s/%s", kubecontext, namespace, r.Name)] = r.Desired()
 	}
 
 	// Since the representation differs between needs and id,
@@ -498,9 +511,6 @@ func (st *HelmState) reformat(spec *ReleaseSpec) []string {
 		components := strings.Split(n, "/")
 
 		name = components[len(components)-1]
-		if !releaseInstalledInfo[name] {
-			st.logger.Warnf("WARNING: %s", fmt.Sprintf("release %s needs %s, but %s is not installed due to installed: false. Either mark %s as installed or remove %s from %s's needs", spec.Name, name, name, name, name, spec.Name))
-		}
 
 		if len(components) > 1 {
 			ns = components[len(components)-2]
@@ -514,6 +524,10 @@ func (st *HelmState) reformat(spec *ReleaseSpec) []string {
 			kubecontext = strings.Join(components[:len(components)-2], "/")
 		} else {
 			kubecontext = spec.KubeContext
+		}
+
+		if spec.Desired() && !releaseInstalledInfo[fmt.Sprintf("%s/%s/%s", kubecontext, ns, name)] {
+			st.logger.Warnf("WARNING: %s", fmt.Sprintf("release %s needs %s, but %s is not installed due to installed: false. Either mark %s as installed or remove %s from %s's needs", spec.Name, name, name, name, name, spec.Name))
 		}
 
 		var componentsAfterOverride []string
@@ -584,7 +598,7 @@ func (st *HelmState) SyncRepos(helm RepoUpdater, shouldSkip map[string]bool) ([]
 func gatherUsernamePassword(repoName string, username string, password string) (string, string) {
 	var user, pass string
 
-	replacedRepoName := strings.ToUpper(strings.Replace(repoName, "-", "_", -1))
+	replacedRepoName := strings.ToUpper(strings.ReplaceAll(repoName, "-", "_"))
 	if username != "" {
 		user = username
 	} else if u := os.Getenv(fmt.Sprintf("%s_USERNAME", replacedRepoName)); u != "" {
@@ -781,7 +795,9 @@ type SyncOpts struct {
 	SkipCleanup          bool
 	SkipCRDs             bool
 	Wait                 bool
+	WaitRetries          int
 	WaitForJobs          bool
+	SyncReleaseLabels    bool
 	ReuseValues          bool
 	ResetValues          bool
 	PostRenderer         string
@@ -1122,6 +1138,7 @@ type ChartPrepareOptions struct {
 	Validate               bool
 	IncludeCRDs            *bool
 	Wait                   bool
+	WaitRetries            int
 	WaitForJobs            bool
 	OutputDir              string
 	OutputDirTemplate      string
@@ -1486,6 +1503,8 @@ type TemplateOpts struct {
 	PostRendererArgs  []string
 	KubeVersion       string
 	ShowOnly          []string
+	// Propagate '--skip-schema-validation' to helmv3 template and helm install
+	SkipSchemaValidation bool
 }
 
 type TemplateOpt interface{ Apply(*TemplateOpts) }
@@ -2258,16 +2277,40 @@ func (st *HelmState) GetReleasesWithOverrides() ([]ReleaseSpec, error) {
 	return rs, nil
 }
 
+func (st *HelmState) GetReleasesWithLabels() []ReleaseSpec {
+	var rs []ReleaseSpec
+	for _, r := range st.Releases {
+		spec := r
+		labels := map[string]string{}
+		// apply common labels
+		for k, v := range st.CommonLabels {
+			labels[k] = v
+		}
+		for k, v := range spec.Labels {
+			labels[k] = v
+		}
+		// Let the release name, namespace, and chart be used as a tag
+		labels["name"] = r.Name
+		labels["namespace"] = r.Namespace
+		// Strip off just the last portion for the name stable/newrelic would give newrelic
+		chartSplit := strings.Split(r.Chart, "/")
+		labels["chart"] = chartSplit[len(chartSplit)-1]
+		spec.Labels = labels
+		rs = append(rs, spec)
+	}
+	return rs
+}
+
 func (st *HelmState) SelectReleases(includeTransitiveNeeds bool) ([]Release, error) {
 	values := st.Values()
-	rs, err := markExcludedReleases(st.Releases, st.Selectors, st.CommonLabels, values, includeTransitiveNeeds)
+	rs, err := markExcludedReleases(st.Releases, st.Selectors, values, includeTransitiveNeeds)
 	if err != nil {
 		return nil, err
 	}
 	return rs, nil
 }
 
-func markExcludedReleases(releases []ReleaseSpec, selectors []string, commonLabels map[string]string, values map[string]any, includeTransitiveNeeds bool) ([]Release, error) {
+func markExcludedReleases(releases []ReleaseSpec, selectors []string, values map[string]any, includeTransitiveNeeds bool) ([]Release, error) {
 	var filteredReleases []Release
 	filters := []ReleaseFilter{}
 	for _, label := range selectors {
@@ -2278,29 +2321,8 @@ func markExcludedReleases(releases []ReleaseSpec, selectors []string, commonLabe
 		filters = append(filters, f)
 	}
 	for _, r := range releases {
-		orginReleaseLabel := maps.Clone(r.Labels)
-		if r.Labels == nil {
-			r.Labels = map[string]string{}
-		} else {
-			// Make a copy of the labels to avoid mutating the original
-			r.Labels = maps.Clone(r.Labels)
-		}
-		// Let the release name, namespace, and chart be used as a tag
-		r.Labels["name"] = r.Name
-		r.Labels["namespace"] = r.Namespace
-		// Strip off just the last portion for the name stable/newrelic would give newrelic
-		chartSplit := strings.Split(r.Chart, "/")
-		r.Labels["chart"] = chartSplit[len(chartSplit)-1]
-		// Merge CommonLabels into release labels
-		for k, v := range commonLabels {
-			r.Labels[k] = v
-		}
-
 		var filterMatch bool
 		for _, f := range filters {
-			if r.Labels == nil {
-				r.Labels = map[string]string{}
-			}
 			if f.Match(r) {
 				filterMatch = true
 				break
@@ -2312,7 +2334,6 @@ func markExcludedReleases(releases []ReleaseSpec, selectors []string, commonLabe
 			return nil, fmt.Errorf("failed to parse condition in release %s: %w", r.Name, err)
 		}
 		// reset the labels to the original
-		r.Labels = orginReleaseLabel
 		res := Release{
 			ReleaseSpec: r,
 			Filtered:    (len(filters) > 0 && !filterMatch) || (!conditionMatch),
@@ -2730,7 +2751,7 @@ func (st *HelmState) flagsForUpgrade(helm helmexec.Interface, release *ReleaseSp
 		flags = append(flags, "--enable-dns")
 	}
 
-	flags = st.appendWaitFlags(flags, release, opt)
+	flags = st.appendWaitFlags(flags, helm, release, opt)
 	flags = st.appendWaitForJobsFlags(flags, release, opt)
 
 	// non-OCI chart should be verified here
@@ -2772,15 +2793,20 @@ func (st *HelmState) flagsForUpgrade(helm helmexec.Interface, release *ReleaseSp
 		flags = append(flags, "--disable-openapi-validation")
 	}
 
+	postRenderer := ""
+	syncReleaseLabels := false
+	if opt != nil {
+		postRenderer = opt.PostRenderer
+		syncReleaseLabels = opt.SyncReleaseLabels
+	}
+
 	flags = st.appendConnectionFlags(flags, release)
 	flags = st.appendChartDownloadFlags(flags, release)
 
 	flags = st.appendHelmXFlags(flags, release)
 
-	postRenderer := ""
-	if opt != nil {
-		postRenderer = opt.PostRenderer
-	}
+	flags = st.appendLabelsFlags(flags, helm, release, syncReleaseLabels)
+
 	flags = st.appendPostRenderFlags(flags, release, postRenderer)
 
 	var postRendererArgs []string
@@ -2816,21 +2842,24 @@ func (st *HelmState) flagsForTemplate(helm helmexec.Interface, release *ReleaseS
 	flags = st.appendChartVersionFlags(flags, release)
 	flags = st.appendHelmXFlags(flags, release)
 
-	postRenderer := ""
 	var postRendererArgs []string
-	kubeVersion := ""
 	var showOnly []string
+	postRenderer := ""
+	kubeVersion := ""
+	skipSchemaValidation := false
 	if opt != nil {
 		postRenderer = opt.PostRenderer
 		postRendererArgs = opt.PostRendererArgs
 		kubeVersion = opt.KubeVersion
 		showOnly = opt.ShowOnly
+		skipSchemaValidation = opt.SkipSchemaValidation
 	}
 	flags = st.appendPostRenderFlags(flags, release, postRenderer)
 	flags = st.appendPostRenderArgsFlags(flags, release, postRendererArgs)
 	flags = st.appendApiVersionsFlags(flags, release, kubeVersion)
 	flags = st.appendChartDownloadFlags(flags, release)
 	flags = st.appendShowOnlyFlags(flags, showOnly)
+	flags = st.appendSkipSchemaValidationFlags(flags, release, skipSchemaValidation)
 
 	common, files, err := st.namespaceAndValuesFlags(helm, release, workerIndex)
 	if err != nil {
